@@ -1,7 +1,7 @@
 from io import StringIO
 
 import h5py
-import numpy
+import numpy as np
 import openmm
 from openff.interchange import Interchange
 from openff.models.models import DefaultModel
@@ -22,11 +22,12 @@ class InteractingSystem(DefaultModel):
     positions: ArrayQuantity["nanometers"]
     omm_system: System = None
     omm_context: Context = None
+    interchange: Interchange = None
 
     def create_omm_objects(self, forcefield):
         topology: Topology = Topology.from_molecules(self.mols)
-        interchange: Interchange = Interchange.from_smirnoff(force_field=forcefield, topology=topology)
-        self.omm_system = interchange.to_openmm(combine_nonbonded_forces=False)
+        self.interchange = Interchange.from_smirnoff(force_field=forcefield, topology=topology)
+        self.omm_system = self.interchange.to_openmm(combine_nonbonded_forces=False)
         omm_integrator = openmm.VerletIntegrator((1 * unit.femtosecond).m_as("picoseconds"))
         self.omm_context = openmm.Context(self.omm_system, omm_integrator, openmm.Platform.getPlatformByName("Reference"))
 
@@ -40,9 +41,14 @@ class InteractingSystem(DefaultModel):
         return True
 
 
+class Hyperparameters(DefaultModel):
+    max_energy_scale: float = 10
+
+
 class NBFit(DefaultModel):
     forcefield: ForceField
     systems: list[InteractingSystem] = []
+    hyperparameters: Hyperparameters = Hyperparameters()
 
     def load_hdf5s(self, filenames: list[str]):
         for filename in filenames:
@@ -74,20 +80,34 @@ class NBFit(DefaultModel):
                 self.systems.append(system)
 
     def eval_energies(self):
+        energies = []
         for system in self.systems:
             for pos_idx in range(system.positions.shape[0]):
-                # TODO get energy far away and subtract off
                 system.omm_context.setPositions(to_openmm(system.positions[pos_idx]))
                 omm_state: openmm.State = system.omm_context.getState(getEnergy=True)
-                print(from_openmm(omm_state.getPotentialEnergy()), system.ai_energy[pos_idx])
+                close_energy = from_openmm(omm_state.getPotentialEnergy())
+
+                tmp = [mol.n_atoms for mol in system.mols]
+                tmp2 = np.vstack([np.zeros((n_atoms, 3)) + (idx * 100) for idx, n_atoms in enumerate(tmp)])
+                tmp3 = Quantity(tmp2, unit.nanometer)
+
+                system.omm_context.setPositions(to_openmm(system.positions[pos_idx] + tmp3))
+                omm_state: openmm.State = system.omm_context.getState(getEnergy=True)
+                far_energy = from_openmm(omm_state.getPotentialEnergy())
+                ai_energy = system.ai_energy[pos_idx]
+                energies.append([(close_energy - far_energy).m_as('kilojoule_per_mole'),
+                                ai_energy.m_as('kilojoule_per_mole')])
+        return energies
 
     def calc_error(self):
-        #fit_energy = system.fit_energy <= 0. ? system.fit_energy: parameters.max_energy * atan(
-        #system.fit_energy / parameters.max_energy);
-        #calc_energy = system.total_energy <= 0. ? system.total_energy: parameters.max_energy * atan(
-        #system.total_energy / parameters.max_energy);
-        #error += pow(calc_energy - fit_energy, 2);
-        return 0.0
+        energies = self.eval_energies()
+        scaler = np.vectorize(lambda x: x if x <= 0 else self.hyperparameters.max_energy_scale * np.arctan(x/self.hyperparameters.max_energy_scale))
+        energies = scaler(energies)
+        error = np.sum(np.square(energies[:, 0] - energies[:, 1]))
+        return error
+
+    def fit(self):
+        return
 
     def update_params_in_contexts(self):
         return
