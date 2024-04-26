@@ -99,6 +99,14 @@ class NBFit(DefaultModel):
                                 ai_energy.m_as('kilojoule_per_mole')])
         return energies
 
+    def get_pot_keys(self, collection: str = 'DampedExp6810'):
+        keys = []
+        for system in self.systems:
+            for key in list(system.interchange.collections[collection].potentials.keys()):
+                if key not in keys:
+                    keys.append(key)
+        return keys
+
     def calc_error(self):
         energies = self.eval_energies()
         scaler = np.vectorize(lambda x: x if x <= 0 else self.hyperparameters.max_energy_scale * np.arctan(x/self.hyperparameters.max_energy_scale))
@@ -106,8 +114,10 @@ class NBFit(DefaultModel):
         error = np.sum(np.square(energies[:, 0] - energies[:, 1]))
         return error
 
-    def fit(self):
-        return
+    def fit(self, collection: str = 'DampedExp6810'):
+        keys = self.get_pot_keys(collection=collection)
+        for key in keys:
+            print(key)
 
     def update_params_in_contexts(self):
         return
