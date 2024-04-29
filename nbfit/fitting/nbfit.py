@@ -1,9 +1,12 @@
 from io import StringIO
+from typing import Union
 
 import h5py
 import numpy as np
 import openmm
 from openff.interchange import Interchange
+from openff.interchange.components.potentials import Potential
+from openff.interchange.models import PotentialKey
 from openff.models.models import DefaultModel
 from openff.toolkit import Molecule, ForceField, Topology
 from openff.models.types import ArrayQuantity, FloatQuantity
@@ -22,6 +25,7 @@ class InteractingSystem(DefaultModel):
     positions: ArrayQuantity["nanometers"]
     omm_system: System = None
     omm_context: Context = None
+    omm_force: Union[openmm.NonbondedForce, openmm.CustomNonbondedForce] = None
     interchange: Interchange = None
 
     def create_omm_objects(self, forcefield):
@@ -29,7 +33,8 @@ class InteractingSystem(DefaultModel):
         self.interchange = Interchange.from_smirnoff(force_field=forcefield, topology=topology)
         self.omm_system = self.interchange.to_openmm(combine_nonbonded_forces=False)
         omm_integrator = openmm.VerletIntegrator((1 * unit.femtosecond).m_as("picoseconds"))
-        self.omm_context = openmm.Context(self.omm_system, omm_integrator, openmm.Platform.getPlatformByName("Reference"))
+        self.omm_context = openmm.Context(self.omm_system, omm_integrator,
+                                          openmm.Platform.getPlatformByName("Reference"))
 
     @staticmethod
     def are_isomorphic(first, other) -> bool:
@@ -96,28 +101,66 @@ class NBFit(DefaultModel):
                 far_energy = from_openmm(omm_state.getPotentialEnergy())
                 ai_energy = system.ai_energy[pos_idx]
                 energies.append([(close_energy - far_energy).m_as('kilojoule_per_mole'),
-                                ai_energy.m_as('kilojoule_per_mole')])
+                                 ai_energy.m_as('kilojoule_per_mole')])
         return energies
 
     def get_pot_keys(self, collection: str = 'DampedExp6810'):
         keys = []
+        vals = []
         for system in self.systems:
             for key in list(system.interchange.collections[collection].potentials.keys()):
                 if key not in keys:
                     keys.append(key)
-        return keys
+                    vals.append(system.interchange.collections[collection].potentials[key])
+        return keys, vals
 
     def calc_error(self):
         energies = self.eval_energies()
-        scaler = np.vectorize(lambda x: x if x <= 0 else self.hyperparameters.max_energy_scale * np.arctan(x/self.hyperparameters.max_energy_scale))
+        scaler = np.vectorize(lambda x: x if x <= 0 else self.hyperparameters.max_energy_scale * np.arctan(
+            x / self.hyperparameters.max_energy_scale))
         energies = scaler(energies)
         error = np.sum(np.square(energies[:, 0] - energies[:, 1]))
         return error
 
-    def fit(self, collection: str = 'DampedExp6810'):
-        keys = self.get_pot_keys(collection=collection)
-        for key in keys:
-            print(key)
+    def fit(self, collection: str = 'DampedExp6810', parameters_to_fit=None):
+        if parameters_to_fit is None and collection is 'DampedExp6810':
+            parameters_to_fit = ['rho', 'beta']
+        elif parameters_to_fit is None and collection is 'vdw':
+            parameters_to_fit = ['sigma', 'epsilon']
 
-    def update_params_in_contexts(self):
-        return
+        keys, vals = self.get_pot_keys(collection=collection)
+
+        # for key, val in zip(keys, vals):
+        #    print(key)
+        #    print(val)
+        #    print()
+
+        error = self.calc_error()
+
+        print(f"\n\nstarting error {error}")
+
+        for key, val in zip(keys, vals):
+            val: Potential
+            print(key.id)
+            for parameter_to_fit in parameters_to_fit:
+                print(parameter_to_fit)
+                print(val.parameters[parameter_to_fit])
+                self.update_params_in_contexts(key, val, collection, parameter_to_fit)
+                new_error = self.calc_error()
+
+    def update_params_in_contexts(self, key: PotentialKey, val: Potential, collection: str, parameter_to_fit: str):
+        for system in self.systems:
+            if key in list(system.interchange.collections[collection].potentials.keys()):
+                print(system.interchange.collections[collection].potentials[key].parameters[parameter_to_fit])
+                if system.omm_force is None:
+                    if collection == 'DampedExp6810':
+                        forces = [force for force in system.omm_system.getForces() if
+                                  isinstance(force, openmm.CustomNonbondedForce)]
+                        system.omm_force = forces[0]
+                    elif collection == 'vdw':
+                        forces = [force for force in system.omm_system.getForces() if
+                                  isinstance(force, openmm.NonbondedForce)]
+                        system.omm_force = forces[0]
+                for idx, params in enumerate(system.interchange.collections['DampedExp6810'].get_system_parameters()):
+                    system.omm_force.setParticleParameters(idx, params)
+                system.omm_force.updateParametersInContext(system.omm_context)
