@@ -48,6 +48,10 @@ class InteractingSystem(DefaultModel):
 
 class Hyperparameters(DefaultModel):
     max_energy_scale: float = 10
+    dx: dict[str, Quantity] = {'sigma': 0.01 * unit.angstrom, 'epsilon': 0.001 * unit.kilojoule_per_mole,
+                               'rho': 0.01 * unit.angstrom, 'beta': 0.01 / unit.angstrom}
+    step_size: dict[str, Quantity] = {'sigma': 0.01 * unit.angstrom, 'epsilon': 0.001 * unit.kilojoule_per_mole,
+                                      'rho': 0.01 * unit.angstrom, 'beta': 0.01 / unit.angstrom}
 
 
 class NBFit(DefaultModel):
@@ -135,9 +139,9 @@ class NBFit(DefaultModel):
         #    print(val)
         #    print()
 
-        error = self.calc_error()
+        old_error = self.calc_error()
 
-        print(f"\n\nstarting error {error}")
+        print(f"\n\nstarting error {old_error}")
 
         for key, val in zip(keys, vals):
             val: Potential
@@ -151,7 +155,7 @@ class NBFit(DefaultModel):
     def update_params_in_contexts(self, key: PotentialKey, val: Potential, collection: str, parameter_to_fit: str):
         for system in self.systems:
             if key in list(system.interchange.collections[collection].potentials.keys()):
-                print(system.interchange.collections[collection].potentials[key].parameters[parameter_to_fit])
+                # print(system.interchange.collections[collection].potentials[key].parameters[parameter_to_fit])
                 if system.omm_force is None:
                     if collection == 'DampedExp6810':
                         forces = [force for force in system.omm_system.getForces() if
@@ -161,6 +165,7 @@ class NBFit(DefaultModel):
                         forces = [force for force in system.omm_system.getForces() if
                                   isinstance(force, openmm.NonbondedForce)]
                         system.omm_force = forces[0]
-                for idx, params in enumerate(system.interchange.collections['DampedExp6810'].get_system_parameters()):
-                    system.omm_force.setParticleParameters(idx, params)
+                if collection == "DampedExp6810":
+                    for idx, params in enumerate(system.interchange.collections['DampedExp6810'].get_system_parameters()):
+                        system.omm_force.setParticleParameters(idx, params)
                 system.omm_force.updateParametersInContext(system.omm_context)
